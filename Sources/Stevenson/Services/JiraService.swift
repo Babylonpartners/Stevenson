@@ -1,5 +1,19 @@
-import Foundation
 import Vapor
+
+extension Application {
+    public var jira: JiraService? {
+        get {
+            self.storage[JiraServiceKey.self]
+        }
+        set {
+            self.storage[JiraServiceKey.self] = newValue
+        }
+    }
+}
+
+struct JiraServiceKey: StorageKey {
+    typealias Value = JiraService
+}
 
 public struct JiraService {
     public let baseURL: URL
@@ -97,21 +111,33 @@ extension JiraService {
         }
     }
 
-    public func create<Fields>(issue: Issue<Fields>, on container: Container) throws -> Future<CreatedIssue> {
-        let fullURL = URL(string: "/rest/api/3/issue", relativeTo: baseURL)!
+    public func create<Fields>(
+        issue: Issue<Fields>,
+        on request: Request
+    ) throws -> EventLoopFuture<CreatedIssue> {
+        let fullURL = URI(
+            string: URL(string: "/rest/api/3/issue", relativeTo: baseURL)!.absoluteString
+        )
 
         let logMessage = "Creating a new issue <\(issue.fields.summary)> on board #\(issue.fields.project.id)"
         self.logInfo(logMessage)
-        return try request(.capture()) {
-            return try container.make(SlowClient.self)
-                .post(fullURL, headers: self.headers, on: container) { request in
-                    try request.content.encode(issue)
-                    self.logRequest(logMessage, request)
-                }
-                .do { response in
-                    self.logResponse(logMessage, response)
-                }
+
+        let response = try request.slowClient.post(
+            fullURL,
+            headers: self.headers,
+            on: request.application
+        ) { request in
+            try request.content.encode(issue)
+            self.logRequest(logMessage, request)
         }
+        .catchError(.capture())
+
+        response.whenSuccess { response in
+            self.logResponse(logMessage, response)
+        }
+
+        return response
+            .flatMapThrowing { try $0.content.decode(CreatedIssue.self) }
     }
 }
 
@@ -136,41 +162,66 @@ extension JiraService {
         }
     }
 
-    public func getVersions(project projectID: Int, on container: Container) throws -> Future<[Version]> {
-        let fullURL = URL(string: "/rest/api/3/project/\(projectID)/versions", relativeTo: baseURL)!
+    public func getVersions(
+        project projectID: Int,
+        on request: Request
+    ) throws -> EventLoopFuture<[Version]> {
+        let fullURL = URI(
+            string: URL(
+                string: "/rest/api/3/project/\(projectID)/versions",
+                relativeTo: baseURL
+            )!.absoluteString
+        )
 
         let projectKey = self.knownProjects.first(where: { $0.value == projectID })?.key ?? "#\(projectID)"
         let logMessage = "Fetching JIRA versions for board <\(projectKey)>"
         self.logInfo(logMessage)
 
-        return try request(.capture()) {
-            return try container.make(SlowClient.self)
-                .get(fullURL, headers: self.headers, on: container) { request in
-                    self.logRequest(logMessage, request)
-                }
-                .do { response in
-                    self.logResponse(logMessage, response)
-                }
+        let response = try request.slowClient.get(
+            fullURL,
+            headers: self.headers,
+            on: request.application
+        ) { request in
+            self.logRequest(logMessage, request)
         }
+        .catchError(.capture())
+
+        response.whenSuccess { response in
+            self.logResponse(logMessage, response)
+        }
+
+        return response
+            .flatMapThrowing { try $0.content.decode([Version].self) }
     }
 
-    public func createVersion(_ version: Version, on container: Container) throws -> Future<Version> {
-        let fullURL = URL(string: "/rest/api/3/version", relativeTo: baseURL)!
+    public func createVersion(
+        _ version: Version,
+        on request: Request
+    ) throws -> EventLoopFuture<Version> {
+        let fullURL = URI(
+            string: URL(string: "/rest/api/3/version", relativeTo: baseURL)!.absoluteString
+        )
 
         let projectKey = self.knownProjects.first(where: { $0.value == version.projectId })?.key ?? "#\(version.projectId)"
         let logMessage = "Creating a new JIRA version <\(version.name)> on board <\(projectKey)>"
         self.logInfo(logMessage)
 
-        return try request(.capture()) {
-            return try container.make(SlowClient.self)
-                .post(fullURL, headers: self.headers, on: container) { request in
-                    try request.content.encode(version)
-                    self.logRequest(logMessage, request)
-                }
-                .do { response in
-                    self.logResponse(logMessage, response)
-                }
+        let response = try request.slowClient.get(
+            fullURL,
+            headers: self.headers,
+            on: request.application
+        ) { request in
+            try request.content.encode(version)
+            self.logRequest(logMessage, request)
         }
+        .catchError(.capture())
+
+        response.whenSuccess { response in
+            self.logResponse(logMessage, response)
+        }
+
+        return response
+            .flatMapThrowing { try $0.content.decode(Version.self) }
     }
 }
 
@@ -192,22 +243,34 @@ extension JiraService {
         }
     }
 
-    public func setFixVersion(_ version: Version, for ticket: String, on container: Container) throws -> Future<Void> {
-        let fullURL = URL(string: "/rest/api/3/issue/\(ticket)", relativeTo: baseURL)!
+    public func setFixVersion(
+        _ version: Version,
+        for ticket: String,
+        on request: Request
+    ) throws -> EventLoopFuture<Void> {
+        let fullURL = URI(
+            string: URL(string: "/rest/api/3/issue/\(ticket)", relativeTo: baseURL)!.absoluteString
+        )
 
         let logMessage = "Setting Fix Version field to <ID \(version.id ?? "nil")> (<\(version.name)>) for ticket <\(ticket)>"
         self.logInfo(logMessage)
 
-        return try request(.capture()) {
-            return try container.make(SlowClient.self)
-                .put(fullURL, headers: self.headers, on: container) { request in
-                    try request.content.encode(VersionAddUpdate(version: version))
-                    self.logRequest(logMessage, request)
-                }
-                .do { response in
-                    self.logResponse(logMessage, response)
-                }
+        let response = try request.slowClient.put(
+            fullURL,
+            headers: self.headers,
+            on: request.application
+        ) { request in
+            try request.content.encode(VersionAddUpdate(version: version))
+            self.logRequest(logMessage, request)
         }
+        .catchError(.capture())
+
+        response.whenSuccess { response in
+            self.logResponse(logMessage, response)
+        }
+
+        return response
+            .map { _ in () }
     }
 }
 
@@ -229,9 +292,9 @@ extension JiraService {
 
 extension JiraService {
     public func browseURL(issue: CreatedIssue) -> String {
-        return self.browseURL(issue: issue.key)
+        self.browseURL(issue: issue.key)
     }
     public func browseURL(issue: String) -> String {
-        return "\(self.baseURL)/browse/\(issue)"
+        "\(self.baseURL)/browse/\(issue)"
     }
 }

@@ -19,11 +19,11 @@ extension SlackCommand {
             `/fastlane test_babylon \(Option.branch.value):develop`
             """,
             allowedChannels: ["ios-build"],
-            run: { metadata, container in
+            run: { metadata, request in
                 try runLane(
                     metadata: metadata,
                     ci: ci,
-                    on: container
+                    on: request
                 )
         })
     }
@@ -43,7 +43,7 @@ extension SlackCommand {
             `/testflight Babylon \(Option.version.value):3.13.0`
             """,
             allowedChannels: ["ios-build"],
-            run: { metadata, container in
+            run: { metadata, request in
                 try runLane(
                     metadata: SlackCommandMetadata(
                         token: metadata.token,
@@ -54,7 +54,7 @@ extension SlackCommand {
                     ),
                     branch: releaseBranchName(from: metadata),
                     ci: ci,
-                    on: container
+                    on: request
                 )
         })
     }
@@ -73,7 +73,7 @@ extension SlackCommand {
             `/appcenter Babylon \(Option.branch.value):develop`
             """,
             allowedChannels: ["ios-build"],
-            run: { metadata, container in
+            run: { metadata, request in
                 try runLane(
                     metadata: SlackCommandMetadata(
                         token: metadata.token,
@@ -83,7 +83,7 @@ extension SlackCommand {
                         responseURL: metadata.responseURL
                     ),
                     ci: ci,
-                    on: container
+                    on: request
                 )
         })
     }
@@ -92,8 +92,8 @@ extension SlackCommand {
         metadata: SlackCommandMetadata,
         branch: String? = nil,
         ci: CircleCIService,
-        on container: Container
-    ) throws -> Future<SlackService.Response> {
+        on request: Request
+    ) throws -> EventLoopFuture<SlackService.Response> {
         let branch = branch
             ?? metadata.value(forOption: .branch)
             ?? RepoMapping.ios.repository.baseBranch
@@ -102,13 +102,13 @@ extension SlackCommand {
             textComponents: metadata.textComponents,
             branch: branch,
             project: RepoMapping.ios.repository.fullName,
-            on: container
+            on: request
         )
 
         return respond(
             to: pipeline,
             metadata: metadata,
-            on: container
+            on: request
         )
     }
 
@@ -116,8 +116,8 @@ extension SlackCommand {
         metadata: SlackCommandMetadata,
         branch: String? = nil,
         ci: CircleCIService,
-        on container: Container
-    ) throws -> Future<SlackService.Response> {
+        on request: Request
+    ) throws -> EventLoopFuture<SlackService.Response> {
         let branch = branch
             ?? metadata.value(forOption: .branch)
             ?? RepoMapping.ios.repository.baseBranch
@@ -126,21 +126,21 @@ extension SlackCommand {
             textComponents: metadata.textComponents,
             branch: branch,
             project: RepoMapping.ios.repository.fullName,
-            on: container
+            on: request
         )
         return respond(
             to: pipeline,
             metadata: metadata,
-            on: container
+            on: request
         )
     }
 
     private static func respond(
-        to pipeline: Future<CircleCIService.PipelineResponse>,
+        to pipeline: EventLoopFuture<CircleCIService.PipelineResponse>,
         metadata: SlackCommandMetadata,
-        on container: Container
-    ) -> Future<SlackService.Response> {
-        return pipeline
+        on request: Request
+    ) -> EventLoopFuture<SlackService.Response> {
+        pipeline
             .map {
                 SlackService.Response("""
                     You asked me: `\(metadata.command) \(metadata.text)`.
@@ -156,7 +156,7 @@ extension SlackCommand {
                     visibility: .channel
                 ),
                 responseURL: metadata.responseURL,
-                on: container
+                on: request
         )
     }
 

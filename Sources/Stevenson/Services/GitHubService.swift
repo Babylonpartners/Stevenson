@@ -1,13 +1,27 @@
-import Foundation
 import Vapor
 
-public struct GitHubService: Service {
+extension Application {
+    public var github: GitHubService? {
+        get {
+            self.storage[GitHubServiceKey.self]
+        }
+        set {
+            self.storage[GitHubServiceKey.self] = newValue
+        }
+    }
+}
+
+struct GitHubServiceKey: StorageKey {
+    typealias Value = GitHubService
+}
+
+public struct GitHubService {
     public let baseURL = URL(string: "https://api.github.com:443")!
     public let headers: HTTPHeaders
 
     public init(username: String, token: String) {
         var headers = HTTPHeaders()
-        headers.add(name: HTTPHeaderName.accept, value: MediaType.json.description)
+        headers.add(name: HTTPHeaders.Name.accept, value: HTTPMediaType.json.description)
         headers.basicAuthorization = BasicAuthorization(username: username, password: token)
         self.headers = headers
     }
@@ -65,25 +79,37 @@ extension GitHubService {
     public func branch(
         in repo: Repository,
         name: String,
-        on container: Container
-    ) throws -> Future<GitHubService.Reference> {
-        let url = URL(string: "/repos/\(repo.fullName)/git/refs/heads/\(name)", relativeTo: baseURL)!
-        return try request(.capture()) {
-            try container.client().get(url, headers: headers)
-        }
+        request: Request
+    ) throws -> EventLoopFuture<GitHubService.Reference> {
+        let url = URI(
+            string: URL(
+                string: "/repos/\(repo.fullName)/git/refs/heads/\(name)",
+                relativeTo: baseURL
+            )!.absoluteString
+        )
+        return try request.client.get(url, headers: headers).flatMapThrowing {
+            try $0.content.decode(GitHubService.Reference.self)
+        }.catchError(.capture())
     }
 
     public func createBranch(
         in repo: Repository,
         name: String,
         from ref: GitHubService.Reference,
-        on container: Container
-    ) throws -> Future<GitHubService.Reference> {
-        let url = URL(string: "/repos/\(repo.fullName)/git/refs", relativeTo: baseURL)!
-        return try request(.capture()) {
-            try container.client().post(url, headers: headers) {
-                try $0.content.encode(["ref": "refs/heads/\(name)", "sha": ref.sha])
-            }
+        request: Request
+    ) throws -> EventLoopFuture<GitHubService.Reference> {
+        let url = URI(
+            string: URL(
+                string: "/repos/\(repo.fullName)/git/refs",
+                relativeTo: baseURL
+            )!.absoluteString
+        )
+        return try request.client.post(url, headers: headers) {
+            try $0.content.encode(["ref": "refs/heads/\(name)", "sha": ref.sha])
+        }
+        .catchError(.capture())
+        .flatMapThrowing {
+            try $0.content.decode(GitHubService.Reference.self)
         }
     }
 
@@ -98,17 +124,23 @@ extension GitHubService {
     /// - Throws: Vapor Exception if the request failed
     public func releases(
         in repo: Repository,
-        on container: Container
-    ) throws -> Future<[String]> {
+        request: Request
+    ) throws -> EventLoopFuture<[String]> {
         struct Response: Content {
             let tag_name: String
         }
-        let url = URL(string: "/repos/\(repo.fullName)/releases?per_page=100", relativeTo: baseURL)!
-        return try request(.capture()) {
-            try container.client().get(url, headers: headers)
-        }.map { (response: [Response]) -> [String] in
-            response.map { $0.tag_name }
-        }
+        let url = URI(
+            string: URL(
+                string: "/repos/\(repo.fullName)/releases?per_page=100",
+                relativeTo: baseURL
+            )!.absoluteString
+        )
+        return try request.client.get(url, headers: headers)
+            .catchError(.capture())
+            .flatMapThrowing{ try $0.content.decode([Response].self) }
+            .map { (response: [Response]) -> [String] in
+                response.map { $0.tag_name }
+            }
     }
 
     public struct PullRequest: Content {
@@ -123,11 +155,18 @@ extension GitHubService {
     public func pullRequest(
         number: Int,
         in repo: Repository,
-        on container: Container
-    ) throws -> Future<PullRequest> {
-        let url = URL(string: "/repos/\(repo.fullName)/pulls/\(number)", relativeTo: baseURL)!
-        return try request(.capture()) {
-            try container.client().get(url, headers: headers)
-        }
+        on request: Request
+    ) throws -> EventLoopFuture<PullRequest> {
+        let url = URI(
+            string: URL(
+                string: "/repos/\(repo.fullName)/pulls/\(number)",
+                relativeTo: baseURL
+            )!.absoluteString
+        )
+        return try request.client.get(url, headers: headers)
+            .catchError(.capture())
+            .flatMapThrowing {
+                try $0.content.decode(PullRequest.self)
+            }
     }
 }

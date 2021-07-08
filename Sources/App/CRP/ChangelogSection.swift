@@ -23,7 +23,7 @@ struct ChangelogSection {
     }
 
     private static func hasSDKChanges(message: String) -> Bool {
-        return message.contains("#SDK") || message.range(of: #"\bSDKS?-[0-9]+\b"#, options: .regularExpression) != nil
+        message.contains("#SDK") || message.range(of: #"\bSDKS?-[0-9]+\b"#, options: .regularExpression) != nil
     }
 
     func tickets() -> (String, [String])? {

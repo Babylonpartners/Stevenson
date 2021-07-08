@@ -1,35 +1,47 @@
 import Vapor
 import Stevenson
 
-/// Register your application's routes here.
 public func routes(
-    router: Router,
-    github: GitHubService,
-    ci: CircleCIService,
-    slack: SlackService,
-    jira: JiraService,
+    _ app: Application,
     commands: [SlackCommand]
 ) throws {
-    router.get { req in
+    app.get { req in
         return "It works!"
     }
 
-    router.post("github/comment") { (request) -> Future<Response> in
-        try github.issueComment(on: request, ci: ci)
+    app.post("github", "comment") { (request) -> EventLoopFuture<Response> in
+        guard let github = app.github,
+              let ci = app.ci else {
+            fatalError("GitHub and CI are not set up")
+        }
+        return try github.issueComment(on: request, ci: ci)
     }
 
-    router.post("api/crp") { (request) -> Future<Response> in
-        try CRPProcess.apiRequest(request: request, github: github, jira: jira, slack: slack)
+    app.post("api", "crp") { (request) -> EventLoopFuture<Response> in
+        guard let github = app.github,
+              let jira = app.jira,
+              let slack = app.slack else {
+            fatalError("GitHub, Jira, and Slack are not set up")
+        }
+        return try CRPProcess.apiRequest(
+            request: request,
+            github: github,
+            jira: jira,
+            slack: slack
+        )
     }
 
     commands.forEach { command in
-        router.post(command.name) { req -> Future<Response> in
+        app.post(PathComponent(stringLiteral: command.name)) { req -> EventLoopFuture<Response> in
+            guard let slack = app.slack else {
+                fatalError("Slack is not set up")
+            }
             do {
                 return try attempt {
                     try slack.handle(command: command, on: req)
                 }
             } catch {
-                return try SlackService.Response(error: error).encode(for: req)
+                return SlackService.Response(error: error).encodeResponse(for: req)
             }
         }
     }

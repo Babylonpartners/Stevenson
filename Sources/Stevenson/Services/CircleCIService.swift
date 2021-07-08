@@ -1,5 +1,20 @@
 import Vapor
 
+extension Application {
+    public var ci: CircleCIService? {
+        get {
+            self.storage[CircleCIServiceKey.self]
+        }
+        set {
+            self.storage[CircleCIServiceKey.self] = newValue
+        }
+    }
+}
+
+struct CircleCIServiceKey: StorageKey {
+    typealias Value = CircleCIService
+}
+
 public struct CircleCIService {
     private let baseURL = URL(string: "https://circleci.com")!
     private let headers: HTTPHeaders = [
@@ -15,8 +30,8 @@ public struct CircleCIService {
 
 }
 
+// MARK: - Job
 extension CircleCIService {
-
     struct BuildRequest: Content {
         let buildParameters: [String: String]
 
@@ -46,20 +61,21 @@ extension CircleCIService {
         parameters: [String: String],
         project: String,
         branch: String,
-        on container: Container
-    ) throws -> Future<BuildResponse> {
-        let url = buildURL(project: project, branch: branch)
-        return try request(.capture()) {
-            try container.client().post(url, headers: headers) {
-                try $0.content.encode(BuildRequest(buildParameters: parameters))
-            }
-        }
+        on request: Request
+    ) throws -> EventLoopFuture<BuildResponse> {
+        let url = URI(string: buildURL(project: project, branch: branch).absoluteString)
+        return try request.client.post(url, headers: headers) {
+            try $0.content.encode(BuildRequest(buildParameters: parameters))
+        }.flatMapThrowing {
+            try $0.content.decode(BuildResponse.self)
+        }.catchError(.capture())
     }
 
 }
 
-extension CircleCIService {
 
+// MARK: - Pipeline
+extension CircleCIService {
     public struct PipelineRequest: Encodable {
         let branch: String
         let parameters: [String: Parameter]
@@ -106,28 +122,28 @@ extension CircleCIService {
     }
 
     private func pipelineURL(project: String) -> URL {
-        return URL(
+        URL(
             string: "/api/v2/project/github/\(project)/pipeline?circle-token=\(token)",
             relativeTo: baseURL
         )!
     }
 
     private func pipelineURL(pipelineID: String) -> URL {
-        return URL(
+        URL(
             string: "/api/v2/pipeline/\(pipelineID)?circle-token=\(token)",
             relativeTo: baseURL
         )!
     }
 
     private func pipelineWorkflowsURL(pipelineID: String) -> URL {
-        return URL(
+        URL(
             string: "/api/v2/pipeline/\(pipelineID)/workflow?circle-token=\(token)",
             relativeTo: baseURL
         )!
     }
 
     private func workflowURL(workflowID: String) -> URL {
-        return URL(
+        URL(
             string: "/workflow-run/\(workflowID)",
             relativeTo: baseURL
         )!
@@ -137,32 +153,47 @@ extension CircleCIService {
         parameters: [String: PipelineRequest.Parameter],
         project: String,
         branch: String,
-        on container: Container
-    ) throws -> Future<PipelineResponse> {
-        let url = pipelineURL(project: project)
+        on request: Request
+    ) throws -> EventLoopFuture<PipelineResponse> {
+        let url = URI(string: pipelineURL(project: project).absoluteString)
 
-        return try request(.capture()) {
-            try container.client().post(url, headers: headers) {
-                try $0.content.encode(json: PipelineRequest(branch: branch, parameters: parameters))
-            }
-        }.flatMap { (pipelineID: PipelineID) -> Future<(Pipeline, PipelineWorkflows)> in
+        return try request.client.post(url, headers: headers) {
+            try $0.content.encode(
+                PipelineRequest(branch: branch, parameters: parameters),
+                using: JSONEncoder()
+            )
+        }
+        .catchError(.capture())
+        .flatMapThrowing {
+            try $0.content.decode(PipelineID.self)
+        }.flatMapThrowing { (pipelineID: PipelineID) -> EventLoopFuture<(Pipeline, PipelineWorkflows)> in
             // workflows are not created immediately so we wait a bit
             // hoping that when we request pipeline the workflow id will be there
             sleep(5)
-            return try self.request(.capture()) {
-                try container.client().get(self.pipelineURL(pipelineID: pipelineID.id), headers: self.headers)
-            }.and(
-                try self.request(.capture()) {
-                    try container.client().get(self.pipelineWorkflowsURL(pipelineID: pipelineID.id), headers: self.headers)
-                }
+            return try request.client.get(
+                URI(string: self.pipelineURL(pipelineID: pipelineID.id).absoluteString),
+                headers: self.headers
             )
-        }.map { (pipeline, workflows) -> PipelineResponse in
-            return PipelineResponse(
-                branch: pipeline.vcs.branch,
-                buildURL: workflows.items.first.map {
-                    self.workflowURL(workflowID: $0.id).absoluteURL
-                } ?? self.baseURL
-            )
+            .catchError(.capture())
+            .and(
+                try request.client.get(
+                    URI(string: self.pipelineWorkflowsURL(pipelineID: pipelineID.id).absoluteString),
+                    headers: self.headers
+                )
+                .catchError(.capture())
+            ).flatMapThrowing { (pipelineResponse, pipelineWorkflowsResponse) in
+                (try pipelineResponse.content.decode(Pipeline.self),
+                 try pipelineWorkflowsResponse.content.decode(PipelineWorkflows.self))
+            }
+        }.flatMap { future in
+            future.map { (pipeline, workflows) -> PipelineResponse in
+                PipelineResponse(
+                    branch: pipeline.vcs.branch,
+                    buildURL: workflows.items.first.map {
+                        self.workflowURL(workflowID: $0.id).absoluteURL
+                    } ?? self.baseURL
+                )
+            }
         }
     }
 }

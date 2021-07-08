@@ -1,4 +1,3 @@
-import Foundation
 import Vapor
 
 extension GitHubService {
@@ -7,7 +6,7 @@ extension GitHubService {
         let commits: [Commit]
 
         func allMessages(includeDetails: Bool) -> [String] {
-            return self.commits.map {
+            self.commits.map {
                 let message = $0.commit.message
                 if includeDetails {
                     return message
@@ -32,12 +31,19 @@ extension GitHubService {
         in repo: Repository,
         from: String,
         to: String,
-        on container: Container
-    ) throws -> Future<CommitList> {
-        let url = URL(string: "/repos/\(repo.fullName)/compare/\(from)...\(to)", relativeTo: baseURL)!
-        return try request(.capture()) {
-            try container.client().get(url, headers: headers)
-        }
+        request: Request
+    ) throws -> EventLoopFuture<CommitList> {
+        let url = URI(
+            string: URL(
+                string: "/repos/\(repo.fullName)/compare/\(from)...\(to)",
+                relativeTo: baseURL
+            )!.absoluteString
+        )
+        return try request.client.get(url, headers: headers)
+            .flatMapThrowing { response -> CommitList in
+                try response.content.decode(CommitList.self)
+            }
+            .catchError(.capture())
     }
 
     /// Return the list of commits between a release branch and the last matching tag.
@@ -52,19 +58,32 @@ extension GitHubService {
     /// - Returns: List of commits between the release branch and the last tag matching the release.appName
     public func changelog(
         for release: Release,
-        on container: Container
-    ) throws -> Future<[String]> {
-        return try releases(in: release.repository, on: container).flatMap { (tags: [String]) -> Future<[String]> in
+        on request: Request
+    ) throws -> EventLoopFuture<[String]> {
+        try releases(
+            in: release.repository,
+            request: request
+        )
+        .flatMapThrowing { (tags: [String]) -> String in
             guard let latestAppTag = tags.first(where: release.isMatchingTag) else {
                 throw ServiceError(message: "Failed to find previous tag matching '\(release.appName)/*' to build the CHANGELOG")
             }
-            let allCommits = try self.commitList(
-                in: release.repository,
-                from: latestAppTag,
-                to: release.branch,
-                on: container
-            )
-            return allCommits.map { $0.allMessages(includeDetails: false) }
+
+            return latestAppTag
+        }
+        .flatMap { (latestAppTag: String) -> EventLoopFuture<[String]> in
+            do {
+                return try self.commitList(
+                    in: release.repository,
+                    from: latestAppTag,
+                    to: release.branch,
+                    request: request
+                ).map {
+                    $0.allMessages(includeDetails: false)
+                }
+            } catch {
+                return request.eventLoop.makeFailedFuture(error)
+            }
         }
     }
 }

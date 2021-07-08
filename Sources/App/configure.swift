@@ -51,38 +51,36 @@ private let jiraProjects = [
 ]
 
 /// Called before your application initializes.
-public func configure(_ config: inout Config, _ env: inout Environment, _ services: inout Services) throws {
-    let logger = PrintLogger()
-
-    let slack = SlackService(
+public func configure(_ app: Application) throws {
+    app.slack = .init(
         verificationToken: try attempt { Environment.slackToken },
         oauthToken: try attempt { Environment.slackOAuthToken }
     )
 
-    let ci = CircleCIService(
-        token: try attempt { Environment.circleciToken }
-    )
+    app.ci = .init(token: try attempt { Environment.circleciToken })
 
-    let jira = JiraService(
+    app.jira = .init(
         baseURL: try attempt { Environment.jiraBaseURL.flatMap(URL.init(string:)) },
         username: try attempt { Environment.jiraUsername },
         password: try attempt { Environment.jiraToken },
         knownProjects: jiraProjects,
-        logger: logger
+        logger: app.logger
     )
 
-    let github = GitHubService(
+    app.github = .init(
         username: try attempt { Environment.githubUsername },
         token: try attempt { Environment.githubToken }
     )
 
-    let router = EngineRouter.default()
+    guard app.slack != nil,
+          let ci = app.ci,
+          let jira = app.jira,
+          let github = app.github else {
+        fatalError("Services are not set up")
+    }
+
     try routes(
-        router: router,
-        github: github,
-        ci: ci,
-        slack: slack,
-        jira: jira,
+        app,
         commands: [
             .stevenson(ci, jira, github),
             .fastlane(ci),
@@ -91,13 +89,23 @@ public func configure(_ config: inout Config, _ env: inout Environment, _ servic
             .crp(jira, github)
         ]
     )
-    services.register(router, as: Router.self)
+}
 
-    var middlewares = MiddlewareConfig()
-    middlewares.use(ErrorMiddleware.self)
-    services.register(middlewares)
-
-    // Some services (like JIRA) might need a slower client which handles rate-limiting APIs and quotas
-    let slowClient = SlowClient()
-    services.register(slowClient)
+extension Environment {
+    /// Verification Token (see SlackBot App settings)
+    static let slackToken       = Environment.get("SLACK_TOKEN")
+    /// Bot User OAuth Access Token (see SlackBot App settings)
+    static let slackOAuthToken  = Environment.get("SLACK_OAUTH_TOKEN")
+    /// GitHub Bot Username
+    static let githubUsername   = Environment.get("GITHUB_USERNAME")
+    /// GitHub Bot Access Token
+    static let githubToken      = Environment.get("GITHUB_TOKEN")
+    /// CircleCI Access Token
+    static let circleciToken    = Environment.get("CIRCLECI_TOKEN")
+    /// JIRA Base URL, e.g. "https://yourorg.atlassian.net"
+    static let jiraBaseURL      = Environment.get("JIRA_BASEURL")
+    /// JIRA Bot Username
+    static let jiraUsername     = Environment.get("JIRA_USERNAME")
+    /// JIRA Bot Access Token
+    static let jiraToken        = Environment.get("JIRA_TOKEN")
 }

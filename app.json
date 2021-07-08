@@ -4,7 +4,7 @@
   ],
   "buildpacks": [
     {
-      "url": "https://github.com/vapor-community/heroku-buildpack"
+      "url": "https://buildpack-registry.s3.amazonaws.com/buildpacks/vapor/vapor.tgz"
     }
   ],
   "env": {

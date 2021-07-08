@@ -73,9 +73,8 @@ extension JiraService {
         release: GitHubService.Release,
         repoMapping: RepoMapping,
         crpProjectID: JiraService.FieldType.ObjectID,
-        container: Request
-    ) throws -> Future<(JiraService.CreatedIssue, JiraService.FixVersionReport)> {
-
+        request: Request
+    ) throws -> EventLoopFuture<(JiraService.CreatedIssue, JiraService.FixVersionReport)> {
         let jiraVersionName = repoMapping.crp.jiraVersionName(release)
         let changelogSections = ChangelogSection.makeSections(from: commitMessages, for: release)
 
@@ -88,16 +87,20 @@ extension JiraService {
             changelog: self.document(from: changelogSections)
         )
 
-        return try self.create(issue: crpIssue, on: container)
+        return try self.create(issue: crpIssue, on: request)
             .catchError(.capture())
-            .flatMap { (crpIssue: JiraService.CreatedIssue) -> Future<(JiraService.CreatedIssue, JiraService.FixVersionReport)> in
+            .flatMap { (crpIssue: JiraService.CreatedIssue) -> EventLoopFuture<(JiraService.CreatedIssue, JiraService.FixVersionReport)> in
                 // Create JIRA versions on each board then set Fixed Versions to that new version on each board's ticket included in Changelog
-                return try self.createAndSetFixVersions(
-                    changelogSections: changelogSections,
-                    versionName: jiraVersionName,
-                    on: container
-                ).map { (crpIssue, $0) }
-        }
+                do {
+                    return try self.createAndSetFixVersions(
+                        changelogSections: changelogSections,
+                        versionName: jiraVersionName,
+                        on: request
+                    ).map { (crpIssue, $0) }
+                } catch {
+                    return request.eventLoop.makeFailedFuture(error)
+                }
+            }
     }
 }
 
@@ -341,7 +344,7 @@ extension JiraService {
         }
 
         var description: String {
-            return errors
+            errors
                 .map { " • \($0.description)" }
                 .joined(separator: "\n")
         }
@@ -350,21 +353,21 @@ extension JiraService {
     func createAndSetFixVersions(
         changelogSections: [ChangelogSection],
         versionName: String,
-        on container: Container
-    ) throws -> Future<FixVersionReport> {
-        return try changelogSections
+        on request: Request
+    ) throws -> EventLoopFuture<FixVersionReport> {
+        try changelogSections
             .compactMap { $0.tickets() }
-            .map { (project: (key: String, tickets: [String])) -> Future<FixVersionReport> in
-                guard let projectID = self.knownProjects[project.key] else {
-                    return container.future(
-                        FixVersionReport(.notInWhitelist(project: project.key))
+            .compactMap { (key: String, tickets: [String]) -> EventLoopFuture<FixVersionReport> in
+                guard let projectID = self.knownProjects[key] else {
+                    return request.eventLoop.future(
+                        FixVersionReport(.notInWhitelist(project: key))
                     )
                 }
 
-                return try self.getVersions(project: projectID, on: container)
-                    .flatMap { allVersions in
+                return try self.getVersions(project: projectID, on: request)
+                    .flatMap { allVersions -> EventLoopFuture<Version> in
                         if let existingVersion = allVersions.first(where: { $0.name == versionName }) {
-                            return container.future(existingVersion)
+                            return request.eventLoop.future(existingVersion)
                         } else {
                             let version = JiraService.Version(
                                 projectId: projectID,
@@ -372,28 +375,41 @@ extension JiraService {
                                 description: versionName,
                                 startDate: Date()
                             )
-                            return try self.createVersion(version, on: container)
+                            do {
+                                return try self.createVersion(version, on: request)
+                            } catch {
+                                return request.eventLoop.makeFailedFuture(error)
+                            }
                         }
                     }
-                    .flatMap { try self.batchSetFixVersions($0, tickets: project.tickets, on: container) }
-                    .mapIfError { error in
-                        return FixVersionReport(.releaseCreationFailed(project: project.key, error: error))
+                    .flatMap { version in
+                        self.batchSetFixVersions(version, tickets: tickets, on: request)
+                    }.recover { error in
+                        FixVersionReport(.releaseCreationFailed(project: key, error: error))
                     }
             }
-            .map(to: FixVersionReport.self, on: container, FixVersionReport.init) // collect an array of reports into a single one
+            .flatten(on: request.eventLoop)
+            .map(FixVersionReport.init(reports:)) // collect an array of reports into a single one
     }
 
-    func batchSetFixVersions(_ version: JiraService.Version, tickets: [String], on container: Container) throws -> Future<FixVersionReport> {
-        return try tickets
-            .map { (ticket: String) -> Future<FixVersionReport> in
-                try self.setFixVersion(version, for: ticket, on: container)
-                    .map { _ in FixVersionReport() }
-                    .mapIfError { error in
-                        let url = self.browseURL(issue: ticket)
-                        return FixVersionReport(.updateFixVersionFailed(ticket: ticket, url: url, error: error))
+    func batchSetFixVersions(
+        _ version: JiraService.Version,
+        tickets: [String],
+        on request: Request
+    ) -> EventLoopFuture<FixVersionReport> {
+        tickets
+            .map { (ticket: String) -> EventLoopFuture<FixVersionReport> in
+                do {
+                    return try self.setFixVersion(version, for: ticket, on: request)
+                        .map { _ in FixVersionReport() }
+                } catch {
+                    let url = self.browseURL(issue: ticket)
+                    let failure = FixVersionReport(.updateFixVersionFailed(ticket: ticket, url: url, error: error))
+                    return request.eventLoop.makeSucceededFuture(failure)
                 }
             }
-            .map(to: FixVersionReport.self, on: container, FixVersionReport.init) // collect an array of reports into a single one
+            .flatten(on: request.eventLoop)
+            .map(FixVersionReport.init(reports:)) // collect an array of reports into a single one
     }
 }
 

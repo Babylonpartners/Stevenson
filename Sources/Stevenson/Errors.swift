@@ -1,15 +1,14 @@
-import Foundation
 import Vapor
 
 extension SlackService {
-    public enum Error: Swift.Error, Debuggable {
+    public enum Error: Swift.Error, DebuggableError {
         case invalidToken
         case invalidChannel(String, allowed: Set<String>)
         case missingParameter(key: String)
         case invalidParameter(key: String, value: String, expected: String)
 
         public var identifier: String {
-            return "SlackService.Error"
+            "SlackService.Error"
         }
 
         public var reason: String {
@@ -30,73 +29,64 @@ extension SlackService {
     }
 }
 
-protocol FailableService: Service {
-    associatedtype ServiceError: Error & Decodable & Debuggable
+protocol FailableService {
+    associatedtype ServiceError: Error & Decodable & DebuggableError
 }
 
 extension FailableService {
     public func request<T: Decodable>(
-        _ sourceLocation: SourceLocation,
-        _ makeRequest: () throws -> Future<Response>
-    ) throws -> Future<T> {
-        return try makeRequest()
-            .flatMap { response in
-                try response.content
-                    .decode(T.self)
-                    .catchFlatMap { _ in
-                        try response.content
-                            .decode(ServiceError.self)
-                            .thenThrowing { throw $0 }
+        _ errorSource: ErrorSource,
+        _ makeRequest: () throws -> EventLoopFuture<Response>
+    ) throws -> EventLoopFuture<T> {
+        try makeRequest()
+            .flatMapThrowing { response -> T in
+                do {
+                    return try response.content
+                        .decode(T.self)
+                } catch {
+                    throw try response.content
+                        .decode(ServiceError.self)
                 }
             }
-            .catchError(sourceLocation)
     }
 
     public func request(
-        _ sourceLocation: SourceLocation,
-        _ makeRequest: () throws -> Future<Response>
-    ) throws -> Future<Void> {
-        return try makeRequest()
-            .flatMap { response in
-                guard response.http.status == .noContent else {
-                    return try response.content
+        _ errorSource: ErrorSource,
+        _ makeRequest: () throws -> EventLoopFuture<Response>
+    ) throws -> EventLoopFuture<Void> {
+        try makeRequest()
+            .flatMapThrowing { (response) in
+                guard response.status == .noContent else {
+                    throw try response.content
                         .decode(ServiceError.self)
-                        .thenThrowing { throw $0 }
                 }
-                return response.future(())
             }
-            .catchError(sourceLocation)
+            .catchError(.capture())
     }
 }
 
 extension CircleCIService: FailableService {
-    struct ServiceError: Swift.Error, Decodable, Debuggable {
+    struct ServiceError: Swift.Error, Decodable, DebuggableError {
         let message: String
-        let identifier: String = "CircleCIService"
-
-        var reason: String {
-            return message
-        }
+        var identifier: String { "CircleCIService" }
+        var reason: String { message }
     }
 }
 
 extension GitHubService: FailableService {
-    struct ServiceError: Swift.Error, Decodable, Debuggable {
+    struct ServiceError: Swift.Error, Decodable, DebuggableError {
         let message: String
-        let identifier: String = "GitHubService"
-
-        var reason: String {
-            return message
-        }
+        var identifier: String { "GitHubService" }
+        var reason: String { message }
     }
 }
 
 extension JiraService: FailableService {
-    public struct ServiceError: Swift.Error, Decodable, Debuggable {
+    public struct ServiceError: Swift.Error, Decodable, DebuggableError {
         // See https://developer.atlassian.com/cloud/jira/platform/rest/v3/#status-codes for schema
         public let errorMessages: [String]
         public let errors: [String: String]
-        public let identifier: String = "JiraService"
+        public var identifier: String { "JiraService" }
 
         public var reason: String {
             let allErrors = errorMessages + errors.sorted(by: <).map { "\($0): \($1)" }
@@ -112,29 +102,29 @@ extension JiraService: FailableService {
     }
 }
 
-public struct NilValueError: Error, Debuggable {
+public struct NilValueError: Error, DebuggableError {
     public let identifier = "nilValue"
     public let reason = "Unexpected nil value"
 }
 
-public struct ThrowError: Error, Debuggable {
+public struct ThrowError: Error, DebuggableError {
     public let error: Error
     public let identifier: String
     public let reason: String
-    public let sourceLocation: SourceLocation?
+    public let sourceLocation: ErrorSource?
 
-    init(error: Error, sourceLocation: SourceLocation) {
+    init(error: Error, sourceLocation: ErrorSource) {
         self.error = error
 
-        let _sourceLocation: SourceLocation?
+        let _sourceLocation: ErrorSource?
         if let throwError = error as? ThrowError {
             self.identifier = throwError.identifier
             self.reason = throwError.reason
             _sourceLocation = throwError.sourceLocation
-        } else if let debuggable = error as? Debuggable {
+        } else if let debuggable = error as? DebuggableError {
             self.identifier = "\(type(of: debuggable)).\(debuggable.identifier)"
             self.reason = debuggable.reason
-            _sourceLocation = debuggable.sourceLocation
+            _sourceLocation = debuggable.source
         } else {
             self.identifier = "\(type(of: error))"
             self.reason = error.localizedDescription
@@ -151,7 +141,7 @@ public struct ThrowError: Error, Debuggable {
     init(error: Error, file: String, line: UInt, column: UInt, function: String) {
         self.init(
             error: error,
-            sourceLocation: SourceLocation(
+            sourceLocation: ErrorSource(
                 file: file,
                 function: function,
                 line: line,
@@ -165,13 +155,13 @@ public struct ThrowError: Error, Debuggable {
 #if !DEBUG
 extension SlackService.Error {
     public var errorDescription: String? {
-        return reason
+        reason
     }
 }
 
 extension ThrowError: LocalizedError {
     public var errorDescription: String? {
-        return reason
+        reason
     }
 }
 #endif
@@ -207,11 +197,32 @@ public func attempt<T>(
     }
 }
 
-extension Future {
-    public func catchError(_ sourceLocation: SourceLocation) -> Future<Expectation> {
-        return catchFlatMap { (error) -> EventLoopFuture<T> in
-            throw ThrowError(error: error, sourceLocation: sourceLocation)
+extension EventLoopFuture {
+    public func catchError(_ errorSource: ErrorSource) throws -> EventLoopFuture<Value> {
+        catchFlatMap { (error) -> EventLoopFuture<Value> in
+            throw ThrowError(error: error, sourceLocation: errorSource)
         }
+    }
+
+    private func catchFlatMap(
+        _ callback: @escaping (Error) throws -> (EventLoopFuture<Value>)
+    ) -> EventLoopFuture<Value> {
+        let promise = eventLoop.makePromise(of: Value.self)
+
+        _ = self.always { result in
+            switch result {
+            case let .success(e):
+                promise.succeed(e)
+            case let .failure(error):
+                do {
+                    try callback(error).cascade(to: promise)
+                } catch {
+                    promise.fail(error)
+                }
+            }
+        }
+
+        return promise.futureResult
     }
 }
 

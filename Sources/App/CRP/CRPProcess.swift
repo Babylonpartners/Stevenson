@@ -1,4 +1,3 @@
-import Foundation
 import Vapor
 import Stevenson
 
@@ -24,7 +23,12 @@ enum CRPProcess {
         case missingParameter(String)
     }
 
-    static func apiRequest(request: Request, github: GitHubService, jira: JiraService, slack: SlackService) throws -> Future<Response> {
+    static func apiRequest(
+        request: Request,
+        github: GitHubService,
+        jira: JiraService,
+        slack: SlackService
+    ) throws -> EventLoopFuture<Response> {
         let repo: String = try Option.repo.get(from: request)
         let branch: String = try Option.branch.get(from: request)
         let channelID: String = try Option.slackChannelID.get(from: request)
@@ -45,8 +49,7 @@ enum CRPProcess {
 
         return try github.changelog(for: release, on: request)
             .catchError(.capture())
-            .flatMap { (commitMessages: [String]) -> Future<JiraService.CreatedIssue> in
-
+            .flatMapThrowing { (commitMessages: [String]) -> EventLoopFuture<JiraService.CreatedIssue> in
                 let changelogSections = ChangelogSection.makeSections(from: commitMessages, for: release)
 
                 // Create CRP Issue
@@ -62,36 +65,45 @@ enum CRPProcess {
                     .catchError(.capture())
 
                 // Spawn a separate Future once CRP created, to trigger the "Fix Version dance" in the background
-                _ = crpResponse.flatMap { _ -> Future<Response> in
+                _ = crpResponse.flatMapThrowing { _ -> EventLoopFuture<Response> in
                     try jira.createAndSetFixVersions(
                         changelogSections: changelogSections,
                         versionName: jiraVersionName,
                         on: request
                     )
                     .catchError(.capture())
-                    .flatMap { (report: JiraService.FixVersionReport) -> Future<Response> in
+                    .flatMap { (report: JiraService.FixVersionReport) -> EventLoopFuture<Response> in
                         let status = report.statusText(releaseName: jiraVersionName)
                         let message = SlackService.Message(channelID: channelID, text: status, attachments: report.asSlackAttachments())
-                        return try slack.post(message: message, on: request)
-                            .catchError(.capture())
+                        do {
+                            return try slack.post(message: message, on: request)
+                                .catchError(.capture())
+                        } catch {
+                            return request.eventLoop.makeFailedFuture(error)
+                        }
                     }
                 }
 
                 return crpResponse
             }
-            .flatMap { crpIssue -> Future<JiraService.CreatedIssue> in
-                let message = "✅ CRP Ticket created: <\(jira.browseURL(issue: crpIssue))|\(crpIssue.key)>"
-                return try slack.post(message: SlackService.Message(channelID: channelID, text: message), on: request)
-                    .map { _ in crpIssue }
-                    .mapIfError { _ in crpIssue }
+            .flatMap {
+                $0.flatMap { crpIssue -> EventLoopFuture<JiraService.CreatedIssue> in
+                    let message = "✅ CRP Ticket created: <\(jira.browseURL(issue: crpIssue))|\(crpIssue.key)>"
+                    do {
+                        return try slack.post(message: SlackService.Message(channelID: channelID, text: message), on: request)
+                            .map { _ in crpIssue }
+                    } catch {
+                        return request.eventLoop.makeSucceededFuture(crpIssue)
+                    }
+                }
             }
-            .map { crpIssue in
+            .flatMapThrowing { crpIssue -> Response in
                 let json: [String: String] = [
                     "key": crpIssue.key,
                     "id": crpIssue.id,
                     "url": jira.browseURL(issue: crpIssue),
                 ]
-                let response = Response(using: request)
+                let response = Response()
                 try response.content.encode(json, as: .json)
                 return response
             }
@@ -100,7 +112,7 @@ enum CRPProcess {
 
 extension JiraService.FixVersionReport {
     func asSlackAttachments() -> [SlackService.Attachment] {
-        return self.errors.map { error -> SlackService.Attachment in
+        self.errors.map { error -> SlackService.Attachment in
             switch error {
             case .notInWhitelist: return .warning(error.description)
             default: return .error(error.description)
@@ -109,7 +121,7 @@ extension JiraService.FixVersionReport {
     }
 }
 
-extension CRPProcess.Error: Debuggable {
+extension CRPProcess.Error: DebuggableError {
     var identifier: String {
         switch self {
         case .invalidParameter(key: let key, value: _, expected: _):
